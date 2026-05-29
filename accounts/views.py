@@ -78,14 +78,7 @@ def login(request):
 
     refresh = RefreshToken.for_user(user)
 
-    user_data = {
-        "id": user.id,
-        "email": user.email,
-        "role": user.role,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "univ_id": user.univ_id
-    }
+    user_data = UserSerializer(user, context={'request': request}).data
 
     if user.role == User.Roles.STUDENT:
         try:
@@ -128,7 +121,7 @@ def logout_view(request):
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    http_method_names = ['get', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         user = self.request.user
@@ -139,6 +132,37 @@ class UserViewSet(viewsets.ModelViewSet):
             return User.objects.filter(id=user.id)
             
         return User.objects.all()
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        instance = serializer.save()
+        
+        # If user is admin/staff, allow updating email and univ_id directly
+        if user.role in [User.Roles.ADMIN, User.Roles.STAFF]:
+            email = self.request.data.get('email')
+            univ_id = self.request.data.get('univ_id')
+            if email:
+                instance.email = email
+            if univ_id:
+                instance.univ_id = univ_id
+            instance.save()
+            
+            # Also update StudentInfo if it exists
+            if instance.role == User.Roles.STUDENT:
+                course = self.request.data.get('course')
+                year_level = self.request.data.get('year_level')
+                
+                student_info, created = StudentInfo.objects.get_or_create(user=instance)
+                if course is not None:
+                    student_info.course = course
+                if year_level is not None:
+                    try:
+                        # Handle year level input like "1 Year" or "1"
+                        clean_year = int(str(year_level).split()[0])
+                        student_info.year_level = clean_year
+                    except ValueError:
+                        pass
+                student_info.save()
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def me(self, request):
@@ -157,12 +181,25 @@ class UserViewSet(viewsets.ModelViewSet):
             )
 
         user_to_modify.role = new_role
-        user_to_modify.save(update_fields=['role'])
+        
+        # Keep Django's is_staff and is_superuser flags in sync
+        if new_role == User.Roles.ADMIN:
+            user_to_modify.is_staff = True
+            user_to_modify.is_superuser = True
+        elif new_role == User.Roles.STAFF:
+            user_to_modify.is_staff = True
+            user_to_modify.is_superuser = False
+        else: # student
+            user_to_modify.is_staff = False
+            user_to_modify.is_superuser = False
+
+        user_to_modify.save(update_fields=['role', 'is_staff', 'is_superuser'])
         
         return Response({
             "message": "Role updated successfully",
             "user_id": user_to_modify.id,
-            "new_role": new_role
+            "new_role": new_role,
+            "user": UserSerializer(user_to_modify).data
         })
 
 
@@ -177,7 +214,21 @@ class StudentInfoViewSet(viewsets.ModelViewSet):
             return StudentInfo.objects.none()
             
         if user.role == User.Roles.STUDENT:
+            # Auto-heal: Ensure this student has StudentInfo
+            StudentInfo.objects.get_or_create(
+                user=user,
+                defaults={'course': 'Not Specified', 'year_level': 1}
+            )
             return StudentInfo.objects.filter(user=user)
+            
+        # Auto-heal: Ensure all student users have StudentInfo
+        student_users = User.objects.filter(role=User.Roles.STUDENT)
+        for s_user in student_users:
+            StudentInfo.objects.get_or_create(
+                user=s_user,
+                defaults={'course': 'Not Specified', 'year_level': 1}
+            )
+            
         return StudentInfo.objects.all()
 
 

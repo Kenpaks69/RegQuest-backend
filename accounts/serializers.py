@@ -3,16 +3,39 @@ from django.core.exceptions import ObjectDoesNotExist
 from .models import User, StudentInfo, StaffInfo, StudentProfile
 
 class UserSerializer(serializers.ModelSerializer):
+    verification_status = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['id','email','univ_id','first_name','middle_name','last_name','role']
+        fields = ['id','email','univ_id','first_name','middle_name','last_name','role','is_active','verification_status']
         read_only_fields = ['id', 'email', 'univ_id', 'role']
+
+    def get_verification_status(self, obj):
+        if obj.role == 'student':
+            try:
+                return obj.verification_profile.verification_status
+            except ObjectDoesNotExist:
+                return 'PENDING'
+        return None
 
 class StudentInfoSerializer(serializers.ModelSerializer):
     user  = UserSerializer(read_only=True)
+    id_image_url = serializers.SerializerMethodField()
+
     class Meta:
         model = StudentInfo
-        fields = ['user', 'course', 'year_level']
+        fields = ['user', 'course', 'year_level', 'id_image_url']
+
+    def get_id_image_url(self, obj):
+        try:
+            profile = obj.user.verification_profile
+            if profile.id_image:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(profile.id_image.url)
+        except AttributeError:
+            pass
+        return None
 
 class StaffInfoSerializer(serializers.ModelSerializer):
     user  = UserSerializer(read_only=True)
@@ -94,9 +117,18 @@ class RegisterSerializer(serializers.ModelSerializer):
             validated_data['univ_id'] = None
     
         if 'username' not in validated_data:
-            import uuid
             base_username = validated_data['email'].split('@')[0]
-            validated_data['username'] = f"{base_username}_{uuid.uuid4().hex[:8]}"
+            # Clean common email characters that aren't ideal for usernames
+            base_username = base_username.replace('.', '_').replace('-', '_')
+            
+            username = base_username
+            counter = 1
+            # Sequential resolution if username is already taken
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+                
+            validated_data['username'] = username
             
         validated_data['role'] = 'student'
             
